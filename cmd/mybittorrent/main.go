@@ -12,7 +12,10 @@ import (
 // Example:
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
-func decodeBencode(bencodedString string) (interface{}, error) {
+func decodeBencode(bencodedString string) (interface{}, int, error) {
+	if len(bencodedString) == 0 {
+		return nil, 1, nil
+	}
 	if unicode.IsDigit(rune(bencodedString[0])) {
 		var firstColonIndex int
 
@@ -27,10 +30,10 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 
 		length, err := strconv.Atoi(lengthStr)
 		if err != nil {
-			return "", err
+			return "", 1, err
 		}
 
-		return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], nil
+		return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], firstColonIndex + length, nil
 	} else if bencodedString[0] == 'i' {
 		var firstEIndex int
 		for i := 0; i < len(bencodedString); i++ {
@@ -42,13 +45,37 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 		intStr := bencodedString[1:firstEIndex]
 		intValue, err := strconv.Atoi(intStr)
 		if err != nil {
-			return "", err
+			return "", 1, err
 		}
 
-		return intValue, nil
+		return intValue, firstEIndex, nil
+	} else if bencodedString[0] == 'l' {
+		list, lastIndexCovered, err := decodeBencodedList(bencodedString[1:])
+		return list, lastIndexCovered, err
+	} else if bencodedString[0] == 'e' {
+		return decodeBencode(bencodedString[1:])
 	} else {
-		return "", fmt.Errorf("Only strings are supported at the moment")
+		return "", -1, fmt.Errorf("Only strings are supported at the moment")
 	}
+}
+
+func decodeBencodedList(bencodedString string) (interface{}, int, error) {
+	list := []interface{}{}
+	i := 0
+	for i < len(bencodedString) {
+		decodedValue, lastIndexCovered, err := decodeBencode(bencodedString[i:])
+		if err != nil {
+			return "", lastIndexCovered, err
+		}
+		if decodedValue != nil {
+			list = append(list, decodedValue)
+		}
+		i += lastIndexCovered + 1
+		for i < len(bencodedString) && bencodedString[i] == 'e' {
+			i++
+		}
+	}
+	return list, i, nil
 }
 
 func main() {
@@ -62,7 +89,7 @@ func main() {
 
 		bencodedValue := os.Args[2]
 
-		decoded, err := decodeBencode(bencodedValue)
+		decoded, _, err := decodeBencode(bencodedValue)
 		if err != nil {
 			fmt.Println(err)
 			return
