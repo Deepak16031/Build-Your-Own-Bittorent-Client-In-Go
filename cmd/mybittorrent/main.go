@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	bencode "github.com/jackpal/bencode-go"
@@ -143,17 +144,22 @@ func main() {
 		// Print the file contents as a string.
 		//fmt.Println("File contents as a string:")
 		//fmt.Println(fileContentString)
-		url, length, sha1Hash := getTorrentInfo(fileContentString)
+		url, length, sha1Hash, pieceLength, pieces := getTorrentInfo(fileContentString)
 		fmt.Println("Tracker URL:", url)
 		fmt.Println("Length:", length)
 		fmt.Println("Info Hash:", sha1Hash)
+		fmt.Println("Piece Length:", pieceLength)
+		fmt.Println("Piece Hashes:")
+		for _, value := range pieces {
+			fmt.Println(value)
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
 }
 
-func getTorrentInfo(contentString string) (string, int, string) {
+func getTorrentInfo(contentString string) (string, int, string, int, []string) {
 	decodedData, _, err := decodeBencode(contentString)
 	if err != nil {
 		fmt.Printf("Invalid decoding string to fetch info %v", err)
@@ -180,7 +186,24 @@ func getTorrentInfo(contentString string) (string, int, string) {
 	sha1Hash.Write(writer.Bytes())
 	hashBytes := sha1Hash.Sum(nil)
 	hashString := fmt.Sprintf("%x", hashBytes)
-	return metadata.Announce, metadata.Info.Length, hashString
+
+	pieces, err := getPieces(metadata.Info.Pieces)
+	return metadata.Announce, metadata.Info.Length, hashString, metadata.Info.PieceLength, pieces
+}
+
+func getPieces(pieces string) ([]string, error) {
+	piecesList := make([]string, 0)
+	if len(pieces)%20 != 0 {
+		return nil, fmt.Errorf("Not a multiple of 20")
+	}
+	i := 0
+	for i+20 <= len(pieces) {
+		sha1Hash := pieces[i : i+20]
+		hexadecimal_string := hex.EncodeToString([]byte(sha1Hash))
+		piecesList = append(piecesList, hexadecimal_string)
+		i += 20
+	}
+	return piecesList, nil
 }
 
 type Metadata struct {
