@@ -51,12 +51,39 @@ func decodeBencode(bencodedString string) (interface{}, int, error) {
 		return intValue, firstEIndex, nil
 	} else if bencodedString[0] == 'l' {
 		list, lastIndexCovered, err := decodeBencodedList(bencodedString[1:])
-		return list, lastIndexCovered, err
+		return list, lastIndexCovered - 1, err
+	} else if bencodedString[0] == 'd' {
+		dict := make(map[string]interface{}, 0)
+		indx := 1
+		for bencodedString[indx] != 'e' && len(bencodedString[indx:]) != 1 {
+			k, KeyLastIndexCovered, err := decodeBencode(bencodedString[indx:])
+			if err != nil {
+				return invalidDecodeType(bencodedString[indx:])
+			}
+			var key string
+			if k, ok := k.(string); !ok {
+				return "", KeyLastIndexCovered, fmt.Errorf("expected string key but got %q", k)
+			} else {
+				key = k
+			}
+			indx += KeyLastIndexCovered + 1
+			v, valueLastIndexCovered, err := decodeBencode(bencodedString[indx:])
+			if err != nil {
+				return invalidDecodeType(bencodedString[indx:])
+			}
+			indx += valueLastIndexCovered + 1
+			dict[key] = v
+		}
+		return dict, indx, nil
 	} else if bencodedString[0] == 'e' {
 		return decodeBencode(bencodedString[1:])
 	} else {
-		return "", -1, fmt.Errorf("Only strings are supported at the moment")
+		return invalidDecodeType(bencodedString)
 	}
+}
+
+func invalidDecodeType(bencodedString string) (interface{}, int, error) {
+	return "", 1, fmt.Errorf("Only strings,ints, lists are supported at the moment, %q", bencodedString)
 }
 
 func decodeBencodedList(bencodedString string) (interface{}, int, error) {
@@ -75,7 +102,7 @@ func decodeBencodedList(bencodedString string) (interface{}, int, error) {
 			i++
 		}
 	}
-	return list, i, nil
+	return list, i - 1, nil
 }
 
 func main() {
