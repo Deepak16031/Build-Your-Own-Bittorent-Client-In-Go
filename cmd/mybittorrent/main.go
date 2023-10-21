@@ -156,20 +156,22 @@ func getTorrentInfo(contentString string) (string, int) {
 		fmt.Printf("Invalid decoding string to fetch info %v", err)
 	}
 
-	m, ok := decodedData.(map[string]interface{})
-	if !ok {
-		fmt.Println("Data is not a map : %v", contentString)
+	marshalledData, err := json.Marshal(decodedData)
+	if err != nil {
+		fmt.Println(err)
 	}
-	announce, ok1 := m["announce"].(string)
-	infoMap, ok3 := m["info"].(map[string]interface{})
-	if !ok3 {
-		fmt.Println("Info data is not a map : %v", m["info"])
-	}
-	length, ok2 := infoMap["length"].(int)
+	metadata := Metadata{}
+	json.Unmarshal(marshalledData, &metadata)
+	return metadata.Announce, metadata.Info.Length
+}
 
-	if !(ok1 && ok2) {
-		fmt.Println("Cant cast to proper values, announce : %v , info : %v", m["announce"], m["info"])
-	}
-
-	return announce, length
+type Metadata struct {
+	Announce string       `json:"announce"`
+	Info     MetadataInfo `json:"info"`
+}
+type MetadataInfo struct {
+	Length      int    `json:"length"`
+	Name        string `json:"name"`
+	PieceLength int    `json:"piece length"`
+	Pieces      string `json:"pieces"`
 }
