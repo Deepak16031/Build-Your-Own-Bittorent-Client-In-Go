@@ -1,13 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	bencode "github.com/jackpal/bencode-go"
 	"log"
 	"os"
 	"strconv"
 	"unicode"
-	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
 )
 
 // Example:
@@ -141,37 +143,53 @@ func main() {
 		// Print the file contents as a string.
 		//fmt.Println("File contents as a string:")
 		//fmt.Println(fileContentString)
-		url, length := getTorrentInfo(fileContentString)
+		url, length, sha1Hash := getTorrentInfo(fileContentString)
 		fmt.Println("Tracker URL:", url)
 		fmt.Println("Length:", length)
+		fmt.Println("Info Hash:", sha1Hash)
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
 }
 
-func getTorrentInfo(contentString string) (string, int) {
+func getTorrentInfo(contentString string) (string, int, string) {
 	decodedData, _, err := decodeBencode(contentString)
 	if err != nil {
 		fmt.Printf("Invalid decoding string to fetch info %v", err)
 	}
 
-	marshalledData, err := json.Marshal(decodedData)
+	// process of marshalling a bencoding to a struct
+	marshalledBytes := bytes.NewBuffer([]byte{})
+	err = bencode.Marshal(marshalledBytes, decodedData)
 	if err != nil {
 		fmt.Println(err)
 	}
 	metadata := Metadata{}
-	json.Unmarshal(marshalledData, &metadata)
-	return metadata.Announce, metadata.Info.Length
+	bencode.Unmarshal(marshalledBytes, &metadata)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	writer := bytes.NewBuffer([]byte{})
+	err = bencode.Marshal(writer, metadata.Info)
+	if err != nil {
+		fmt.Println(err)
+	}
+	sha1Hash := sha1.New()
+	sha1Hash.Write(writer.Bytes())
+	hashBytes := sha1Hash.Sum(nil)
+	hashString := fmt.Sprintf("%x", hashBytes)
+	return metadata.Announce, metadata.Info.Length, hashString
 }
 
 type Metadata struct {
-	Announce string       `json:"announce"`
-	Info     MetadataInfo `json:"info"`
+	Announce string       `bencode:"announce"`
+	Info     MetadataInfo `bencode:"info"`
 }
 type MetadataInfo struct {
-	Length      int    `json:"length"`
-	Name        string `json:"name"`
-	PieceLength int    `json:"piece length"`
-	Pieces      string `json:"pieces"`
+	Length      int    `bencode:"length"`
+	Name        string `bencode:"name"`
+	PieceLength int    `bencode:"piece length"`
+	Pieces      string `bencode:"pieces"`
 }
