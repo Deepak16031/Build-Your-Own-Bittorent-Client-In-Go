@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"unicode"
@@ -124,8 +125,51 @@ func main() {
 
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
+	} else if command == "info" {
+		// Get the path to the file from the command-line argument.
+		filePath := os.Args[2]
+
+		// Read the entire contents of the file into a string.
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Convert the byte slice to a string.
+		fileContentString := string(content)
+
+		// Print the file contents as a string.
+		//fmt.Println("File contents as a string:")
+		//fmt.Println(fileContentString)
+		url, length := getTorrentInfo(fileContentString)
+		fmt.Println("Tracker URL:", url)
+		fmt.Println("Length:", length)
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+}
+
+func getTorrentInfo(contentString string) (string, int) {
+	decodedData, _, err := decodeBencode(contentString)
+	if err != nil {
+		fmt.Printf("Invalid decoding string to fetch info %v", err)
+	}
+
+	m, ok := decodedData.(map[string]interface{})
+	if !ok {
+		fmt.Println("Data is not a map : %v", contentString)
+	}
+	announce, ok1 := m["announce"].(string)
+	infoMap, ok3 := m["info"].(map[string]interface{})
+	if !ok3 {
+		fmt.Println("Info data is not a map : %v", m["info"])
+	}
+	length, ok2 := infoMap["length"].(int)
+
+	if !(ok1 && ok2) {
+		fmt.Println("Cant cast to proper values, announce : %v , info : %v", m["announce"], m["info"])
+	}
+
+	return announce, length
 }
