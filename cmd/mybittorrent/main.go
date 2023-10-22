@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	bencode "github.com/jackpal/bencode-go"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"unicode"
@@ -144,7 +148,7 @@ func main() {
 		// Print the file contents as a string.
 		//fmt.Println("File contents as a string:")
 		//fmt.Println(fileContentString)
-		url, length, sha1Hash, pieceLength, pieces := getTorrentInfo(fileContentString)
+		url, length, sha1Hash, pieceLength, pieces, _ := getTorrentInfo(fileContentString)
 		fmt.Println("Tracker URL:", url)
 		fmt.Println("Length:", length)
 		fmt.Println("Info Hash:", sha1Hash)
@@ -153,13 +157,23 @@ func main() {
 		for _, value := range pieces {
 			fmt.Println(value)
 		}
+	} else if command == "peers" {
+		filePath := os.Args[2]
+		_, peers, err := getTrackerResponse(filePath)
+		if err != nil {
+			fmt.Println("Unable to fetch tracker data :", err)
+		}
+		fmt.Println()
+		for _, value := range peers {
+			fmt.Println(value)
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
 }
 
-func getTorrentInfo(contentString string) (string, int, string, int, []string) {
+func getTorrentInfo(contentString string) (string, int, string, int, []string, []byte) {
 	decodedData, _, err := decodeBencode(contentString)
 	if err != nil {
 		fmt.Printf("Invalid decoding string to fetch info %v", err)
@@ -173,6 +187,7 @@ func getTorrentInfo(contentString string) (string, int, string, int, []string) {
 	}
 	metadata := Metadata{}
 	bencode.Unmarshal(marshalledBytes, &metadata)
+	//fmt.Println("metadata info: ", metadata.Info)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -188,7 +203,7 @@ func getTorrentInfo(contentString string) (string, int, string, int, []string) {
 	hashString := fmt.Sprintf("%x", hashBytes)
 
 	pieces, err := getPieces(metadata.Info.Pieces)
-	return metadata.Announce, metadata.Info.Length, hashString, metadata.Info.PieceLength, pieces
+	return metadata.Announce, metadata.Info.Length, hashString, metadata.Info.PieceLength, pieces, hashBytes
 }
 
 func getPieces(pieces string) ([]string, error) {
@@ -206,6 +221,66 @@ func getPieces(pieces string) ([]string, error) {
 	return piecesList, nil
 }
 
+func getTrackerResponse(filePath string) (int, []string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fileContentString := string(content)
+	baseUrl, length, _, _, _, infoHashRaw := getTorrentInfo(fileContentString)
+	params := url.Values{}
+	params.Add("info_hash", string(infoHashRaw))
+	params.Add("peer_id", "00112233445566778899")
+	params.Add("port", "6881")
+	params.Add("uploaded", strconv.Itoa(0))
+	params.Add("downloaded", strconv.Itoa(0))
+	params.Add("left", strconv.Itoa(length))
+	params.Add("compact", strconv.Itoa(1))
+
+	requestUrl := baseUrl + "?" + params.Encode()
+	resp, err := http.Get(requestUrl)
+	defer resp.Body.Close()
+	if err != nil {
+		return -1, nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	respBenDict := string(body)
+	decodedValue, _, err := decodeBencode(respBenDict)
+	if err != nil {
+		return -1, nil, err
+	}
+	dataMap := decodedValue.(map[string]interface{})
+
+	peers := getPeersList(decodedValue)
+	return dataMap["interval"].(int), peers, nil
+
+}
+
+func getPeersList(decodedValue interface{}) []string {
+	marshalledBytes := bytes.NewBuffer([]byte{})
+	err := bencode.Marshal(marshalledBytes, decodedValue)
+	if err != nil {
+		fmt.Println(err)
+	}
+	trackerResponse := TrackerResponse{}
+	bencode.Unmarshal(marshalledBytes, &trackerResponse)
+
+	var peersList []string
+	// convert to byte array
+
+	byteArr := []byte(trackerResponse.Peers)
+
+	i := 0
+	for i+6 <= len(byteArr) {
+		address := fmt.Sprintf("%v.%v.%v.%v", byteArr[i], byteArr[i+1], byteArr[i+2], byteArr[i+3])
+		port := binary.BigEndian.Uint16(byteArr[i+4 : i+6])
+		peersList = append(peersList, fmt.Sprintf("%s:%d", address, port))
+		i += 6
+	}
+	return peersList
+}
+
 type Metadata struct {
 	Announce string       `bencode:"announce"`
 	Info     MetadataInfo `bencode:"info"`
@@ -215,4 +290,9 @@ type MetadataInfo struct {
 	Name        string `bencode:"name"`
 	PieceLength int    `bencode:"piece length"`
 	Pieces      string `bencode:"pieces"`
+}
+
+type TrackerResponse struct {
+	Internval int    `bencode:"interval"`
+	Peers     string `bencode:"peers"`
 }
