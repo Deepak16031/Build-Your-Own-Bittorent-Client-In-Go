@@ -10,6 +10,7 @@ import (
 	bencode "github.com/jackpal/bencode-go"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -167,6 +168,51 @@ func main() {
 		for _, value := range peers {
 			fmt.Println(value)
 		}
+	} else if command == "handshake" {
+		filePath := os.Args[2]
+		address := os.Args[3]
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Convert the byte slice to a string.
+		fileContentString := string(content)
+		_, _, _, _, _, infoHashRaw := getTorrentInfo(fileContentString)
+
+		var length uint8 = 19
+		var protocol []byte = []byte("BitTorrent protocol")
+		reservedBytes := make([]byte, 8)
+		shaInfoHash := []byte(infoHashRaw)
+		peerId := []byte("00112233445566778899")
+
+		var request []byte
+		request = append(request, length)
+		request = append(request, protocol...)
+		request = append(request, reservedBytes...)
+		request = append(request, shaInfoHash...)
+		request = append(request, peerId...)
+
+		conn, err := net.Dial("tcp", address)
+		if err != nil {
+			fmt.Println("Failed to establish tcp connection with - ", address)
+		}
+		conn.Write(request)
+
+		// Receive a response from the server
+		buffer := make([]byte, 128)
+		_, err = conn.Read(buffer)
+
+		if err != nil {
+			fmt.Println("Error receiving buffer", err)
+		}
+		// Print the ACK.
+		ackPeerIdBuffer := buffer[48:68]
+		peerIdHex := fmt.Sprintf("%x", ackPeerIdBuffer)
+		fmt.Println("Peer ID:", peerIdHex)
+		conn.Close()
+
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
