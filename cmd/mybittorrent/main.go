@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	bencode "github.com/jackpal/bencode-go"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -193,7 +195,7 @@ func main() {
 
 		// Convert the byte slice to a string.
 		fileContentString := string(content)
-		infoHashRaw := getTorrentInfo(fileContentString).InfoHash
+		infoHashRaw := getTorrentInfo(fileContentString).RawInfoHash
 
 		var length uint8 = 19
 		var protocol []byte = []byte("BitTorrent protocol")
@@ -215,7 +217,8 @@ func main() {
 		conn.Write(request)
 
 		// Receive a response from the server
-		buffer := make([]byte, 128)
+		time.Sleep(time.Second * 2)
+		buffer := make([]byte, 68)
 		_, err = conn.Read(buffer)
 
 		if err != nil {
@@ -226,18 +229,20 @@ func main() {
 		peerIdHex := fmt.Sprintf("%x", ackPeerIdBuffer)
 		fmt.Println("Peer ID:", peerIdHex)
 		conn.Close()
-	} else if command == "download_piece" {
-		filePath := os.Args[2]
-		address := os.Args[3]
+	} else if command == "download_piece" && "-o" == os.Args[2] {
+		torrentPath := os.Args[4]
+		pieceToDownload, _ := strconv.Atoi(os.Args[5])
+		filePath := os.Args[3]
 
-		content, err := os.ReadFile(filePath)
+		content, err := os.ReadFile(torrentPath)
 		if err != nil {
 			log.Fatal(err)
 		}
-
 		// Convert the byte slice to a string.
 		fileContentString := string(content)
 		torrentInfo := getTorrentInfo(fileContentString)
+		peers, err := getTrackerResponse(torrentPath)
+		address := peers[0]
 
 		var length uint8 = 19
 		var protocol []byte = []byte("BitTorrent protocol")
@@ -265,22 +270,17 @@ func main() {
 		_, err = conn.Read(buffer)
 
 		if err != nil {
-			fmt.Println("Error receiving buffer", err)
+			fmt.Println("Error receiving buffer, err-", err)
 		}
-		// Print the ACK.
-		ackPeerIdBuffer := buffer[48:68]
-		peerIdHex := fmt.Sprintf("%x", ackPeerIdBuffer)
-		fmt.Println("Handshake established with - ", peerIdHex)
 
 		if err != nil {
 			log.Fatalf("%v", err)
 		}
-		buffer = make([]byte, 6)
-		conn.Read(buffer)
-		//msg, _ := waitForMessage(conn)
-		//if msg.Id != bitfield {
-		//	log.Fatalf("Expected bitfield message as first message")
-		//}
+
+		msg, err := waitForMessage(conn)
+		if msg.Id != bitfield {
+			log.Fatalf("Expected bitfield message as first message", err)
+		}
 
 		// send interested msg
 		msgToSent := PeerMessage{
@@ -290,73 +290,81 @@ func main() {
 		}
 		sendMessage(conn, msgToSent)
 
-		//wait for unchoke msg
-		//msg, err = waitForMessage(conn)
-		buffer = make([]byte, 5)
-		conn.Read(buffer)
-		if err != nil {
-			log.Fatalf("Error occured for waiting message for unchoke %v", err)
-		}
-		//if msg.Id != unchoke {
-		//	log.Fatalf("Expected unchoke message as second message")
+		//buffer = make([]byte, 5)
+		//conn.Read(buffer)
+		//if err != nil {
+		//	log.Fatalf("Error occured for waiting message for unchoke %v", err)
 		//}
+		//wait for unchoke msg
+		msg, err = waitForMessage(conn)
+		if msg.Id != unchoke || err != nil {
+			log.Fatalf("Expected unchoke message as second message, err -", err)
+		}
 
 		numberOfPieces := len(torrentInfo.Pieces)
-		// all the piece except last one is straight forward
-		// send request for each piece block wise
-		// store in an byte slice, append each
-		// save it
+
 		blockSize := 16384
-		for i := 0; i < numberOfPieces-1; i++ {
-			block := []byte{}
-			for j := 0; j < torrentInfo.PieceLength/blockSize; j++ {
-				msgToSent = PeerMessage{
-					PayloadLength: 0,
-					Id:            MessageId(6),
-					Payload:       nil,
-				}
-				payload := intToBytes(i)
-				payload = append(payload, intToBytes(blockSize*j)...)
-				payload = append(payload, intToBytes(blockSize)...)
-				msgToSent.PayloadLength = 13
-				msgToSent.Payload = payload
-				err := sendMessage(conn, msgToSent)
-
-				if err != nil {
-					log.Fatalf("Error sending block request : %v", msgToSent)
-				}
-				buffer = make([]byte, 16397)
-
-				conn.Read(buffer)
-				//msg, err := waitForMessage(conn)
-				//if msg.Id != piece {
-				//	log.Fatalf("Expected PIECE msg for the msgSent - %+v, received msg %+v", msgToSent, msg)
-				//}
-				block = append(block, buffer[13:]...)
-			}
-			//buffer = make([]byte, 1000000)
-			//conn.Read(buffer)
-			//check hash
-			//
-			writer := bytes.NewBuffer([]byte{})
-			err = bencode.Marshal(writer, block)
-			if err != nil {
-				fmt.Println(err)
-			}
-			sha1Hash := sha1.New()
-			sha1Hash.Write(writer.Bytes())
-			blockHash := sha1Hash.Sum(nil)
-			if fmt.Sprintf("%x", blockHash) != torrentInfo.Pieces[i] {
-				log.Fatalf("Hashes are not equal \n blockhash-%x \n pieceHash - %v", blockHash, torrentInfo.Pieces[i])
-			}
+		pieceSize := blockSize
+		block := downloadPiece(torrentInfo, blockSize, msgToSent, pieceToDownload, numberOfPieces, pieceSize, conn)
+		//for i := 0; i < numberOfPieces; i++ {
+		//	//writer := bytes.NewBuffer([]byte{})
+		//	//err = bencode.Marshal(writer, block)
+		//	//if err != nil {
+		//	//	fmt.Println(err)
+		//	//}
+		//	//sha1Hash := sha1.New()
+		//	//sha1Hash.Write(writer.Bytes())
+		//	//blockHash := sha1Hash.Sum(nil)
+		//	//if fmt.Sprintf("%x", blockHash) != torrentInfo.Pieces[i] {
+		//	//	log.Fatalf("Hashes are not equal \n blockhash-%x \n pieceHash - %v", blockHash, torrentInfo.Pieces[i])
+		//	//}
+		//}
+		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+		defer file.Close()
+		if err != nil {
+			log.Fatalf("Not able to create file from scratch, err-", err)
 		}
-		buffer = make([]byte, 100000)
-
+		err = ioutil.WriteFile(filePath, block, 0644)
+		if err != nil {
+			log.Fatalf("Data not written")
+		}
+		fmt.Printf("Piece %v downloaded to %v.\n", pieceToDownload, filePath)
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
 
+}
+
+func downloadPiece(torrentInfo TorrentInfo, blockSize int, msgToSent PeerMessage, pieceIndex int, numberOfPieces int, pieceSize int, conn net.Conn) []byte {
+	block := []byte{}
+	for j := 0; j < torrentInfo.PieceLength/blockSize; j++ {
+		msgToSent = PeerMessage{
+			PayloadLength: 0,
+			Id:            MessageId(6),
+			Payload:       nil,
+		}
+		payload := intToBytes(pieceIndex)
+		payload = append(payload, intToBytes(blockSize*j)...)
+		if pieceIndex == numberOfPieces-1 && j == (torrentInfo.PieceLength/blockSize-1) {
+			pieceSize = torrentInfo.TotalLength % blockSize
+		}
+		payload = append(payload, intToBytes(pieceSize)...)
+		msgToSent.PayloadLength = 13
+		msgToSent.Payload = payload
+		err := sendMessage(conn, msgToSent)
+
+		if err != nil {
+			log.Fatalf("Error sending block request : %v", msgToSent)
+		}
+
+		msg, err := waitForMessage(conn)
+		if msg.Id != piece {
+			log.Fatalf("Expected PIECE msg for the msgSent - %+v, received msg %+v", msgToSent, msg)
+		}
+		block = append(block, msg.Payload[8:]...)
+	}
+	return block
 }
 
 func waitForMessage(conn net.Conn) (*PeerMessage, error) {
@@ -375,9 +383,11 @@ func waitForMessage(conn net.Conn) (*PeerMessage, error) {
 		//message length
 		//var messageLength int32
 		//TODO put error handling
+		bufioReader := bufio.NewReader(conn)
+
 		buffer := make([]byte, 4)
-		n, err := conn.Read(buffer)
-		if err != nil {
+		n, err := io.ReadFull(bufioReader, buffer)
+		if n != 4 || err != nil {
 			log.Fatalf("not enough data to read? number of bytes:%v, err- %v", n, err)
 		}
 		err = binary.Read(bytes.NewReader(buffer), binary.BigEndian, &peerMessage.PayloadLength)
@@ -385,12 +395,12 @@ func waitForMessage(conn net.Conn) (*PeerMessage, error) {
 			fmt.Println("cant read length: ", err)
 		}
 		buffer = make([]byte, 1)
-		conn.Read(buffer)
+		n, err = io.ReadFull(bufioReader, buffer)
 		binary.Read(bytes.NewReader(buffer), binary.BigEndian, &peerMessage.Id)
 
 		if peerMessage.PayloadLength > 1 {
 			buffer = make([]byte, peerMessage.PayloadLength-1)
-			conn.Read(buffer)
+			n, err = io.ReadFull(bufioReader, buffer)
 			peerMessage.Payload = make([]uint8, peerMessage.PayloadLength-1)
 			binary.Read(bytes.NewReader(buffer), binary.BigEndian, &peerMessage.Payload)
 		}
