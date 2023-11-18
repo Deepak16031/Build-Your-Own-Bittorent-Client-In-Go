@@ -15,9 +15,18 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 )
+
+func decodeBencoded(bencodedString string) (interface{}, error) {
+	decoded, err := bencode.Decode(strings.NewReader(bencodedString))
+	if err != nil {
+		return nil, fmt.Errorf("Only strings,ints, lists are supported at the moment, %q", bencodedString)
+	}
+	return decoded, nil
+}
 
 // Example:
 // - 5:hello -> hello
@@ -126,7 +135,7 @@ func main() {
 
 		bencodedValue := os.Args[2]
 
-		decoded, _, err := decodeBencode(bencodedValue)
+		decoded, err := decodeBencoded(bencodedValue)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -165,7 +174,7 @@ func main() {
 		}
 	} else if command == "peers" {
 		filePath := os.Args[2]
-		_, peers, err := getTrackerResponse(filePath)
+		peers, err := getTrackerResponse(filePath)
 		if err != nil {
 			fmt.Println("Unable to fetch tracker data :", err)
 		}
@@ -445,7 +454,7 @@ func sendMessage(conn net.Conn, message PeerMessage) error {
 //   - Pieces: a slice of piece hashes.
 //   - Hash Bytes: the raw hash bytes of the torrent info.
 func getTorrentInfo(contentString string) TorrentInfo {
-	decodedData, _, err := decodeBencode(contentString)
+	decodedData, err := decodeBencoded(contentString)
 	if err != nil {
 		fmt.Printf("Invalid decoding string to fetch info %v", err)
 	}
@@ -501,7 +510,7 @@ func getPieces(pieces string) ([]string, error) {
 	return piecesList, nil
 }
 
-func getTrackerResponse(filePath string) (int, []string, error) {
+func getTrackerResponse(filePath string) ([]string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Fatal(err)
@@ -523,19 +532,18 @@ func getTrackerResponse(filePath string) (int, []string, error) {
 	resp, err := http.Get(requestUrl)
 	defer resp.Body.Close()
 	if err != nil {
-		return -1, nil, err
+		return nil, err
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	respBenDict := string(body)
-	decodedValue, _, err := decodeBencode(respBenDict)
+	decodedValue, err := decodeBencoded(respBenDict)
 	if err != nil {
-		return -1, nil, err
+		return nil, err
 	}
-	dataMap := decodedValue.(map[string]interface{})
 
 	peers := getPeersList(decodedValue)
-	return dataMap["interval"].(int), peers, nil
+	return peers, nil
 
 }
 
