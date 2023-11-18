@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 	"unicode"
 )
 
@@ -149,7 +150,11 @@ func main() {
 		// Print the file contents as a string.
 		//fmt.Println("File contents as a string:")
 		//fmt.Println(fileContentString)
-		url, length, sha1Hash, pieceLength, pieces, _ := getTorrentInfo(fileContentString)
+		torrentInfo := getTorrentInfo(fileContentString)
+		url, length, sha1Hash, pieceLength, pieces :=
+			torrentInfo.Announce, torrentInfo.TotalLength,
+			torrentInfo.InfoHash, torrentInfo.PieceLength,
+			torrentInfo.Pieces
 		fmt.Println("Tracker URL:", url)
 		fmt.Println("Length:", length)
 		fmt.Println("Info Hash:", sha1Hash)
@@ -179,7 +184,7 @@ func main() {
 
 		// Convert the byte slice to a string.
 		fileContentString := string(content)
-		_, _, _, _, _, infoHashRaw := getTorrentInfo(fileContentString)
+		infoHashRaw := getTorrentInfo(fileContentString).InfoHash
 
 		var length uint8 = 19
 		var protocol []byte = []byte("BitTorrent protocol")
@@ -212,14 +217,234 @@ func main() {
 		peerIdHex := fmt.Sprintf("%x", ackPeerIdBuffer)
 		fmt.Println("Peer ID:", peerIdHex)
 		conn.Close()
+	} else if command == "download_piece" {
+		filePath := os.Args[2]
+		address := os.Args[3]
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Convert the byte slice to a string.
+		fileContentString := string(content)
+		torrentInfo := getTorrentInfo(fileContentString)
+
+		var length uint8 = 19
+		var protocol []byte = []byte("BitTorrent protocol")
+		reservedBytes := make([]byte, 8)
+		shaInfoHash := []byte(torrentInfo.RawInfoHash)
+		peerId := []byte("00112233445566778899")
+
+		var request []byte
+		request = append(request, length)
+		request = append(request, protocol...)
+		request = append(request, reservedBytes...)
+		request = append(request, shaInfoHash...)
+		request = append(request, peerId...)
+
+		conn, err := net.Dial("tcp", address)
+		defer conn.Close()
+		if err != nil {
+			log.Fatal("Failed to establish tcp connection with - ", address)
+		}
+
+		conn.Write(request)
+
+		// Receive a response from the server
+		buffer := make([]byte, 68)
+		_, err = conn.Read(buffer)
+
+		if err != nil {
+			fmt.Println("Error receiving buffer", err)
+		}
+		// Print the ACK.
+		ackPeerIdBuffer := buffer[48:68]
+		peerIdHex := fmt.Sprintf("%x", ackPeerIdBuffer)
+		fmt.Println("Handshake established with - ", peerIdHex)
+
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		buffer = make([]byte, 6)
+		conn.Read(buffer)
+		//msg, _ := waitForMessage(conn)
+		//if msg.Id != bitfield {
+		//	log.Fatalf("Expected bitfield message as first message")
+		//}
+
+		// send interested msg
+		msgToSent := PeerMessage{
+			PayloadLength: 1,
+			Id:            interested,
+			Payload:       nil,
+		}
+		sendMessage(conn, msgToSent)
+
+		//wait for unchoke msg
+		//msg, err = waitForMessage(conn)
+		buffer = make([]byte, 5)
+		conn.Read(buffer)
+		if err != nil {
+			log.Fatalf("Error occured for waiting message for unchoke %v", err)
+		}
+		//if msg.Id != unchoke {
+		//	log.Fatalf("Expected unchoke message as second message")
+		//}
+
+		numberOfPieces := len(torrentInfo.Pieces)
+		// all the piece except last one is straight forward
+		// send request for each piece block wise
+		// store in an byte slice, append each
+		// save it
+		blockSize := 16384
+		for i := 0; i < numberOfPieces-1; i++ {
+			block := []byte{}
+			for j := 0; j < torrentInfo.PieceLength/blockSize; j++ {
+				msgToSent = PeerMessage{
+					PayloadLength: 0,
+					Id:            MessageId(6),
+					Payload:       nil,
+				}
+				payload := intToBytes(i)
+				payload = append(payload, intToBytes(blockSize*j)...)
+				payload = append(payload, intToBytes(blockSize)...)
+				msgToSent.PayloadLength = 13
+				msgToSent.Payload = payload
+				err := sendMessage(conn, msgToSent)
+
+				if err != nil {
+					log.Fatalf("Error sending block request : %v", msgToSent)
+				}
+				buffer = make([]byte, 16397)
+
+				conn.Read(buffer)
+				//msg, err := waitForMessage(conn)
+				//if msg.Id != piece {
+				//	log.Fatalf("Expected PIECE msg for the msgSent - %+v, received msg %+v", msgToSent, msg)
+				//}
+				block = append(block, buffer[13:]...)
+			}
+			//buffer = make([]byte, 1000000)
+			//conn.Read(buffer)
+			//check hash
+			//
+			writer := bytes.NewBuffer([]byte{})
+			err = bencode.Marshal(writer, block)
+			if err != nil {
+				fmt.Println(err)
+			}
+			sha1Hash := sha1.New()
+			sha1Hash.Write(writer.Bytes())
+			blockHash := sha1Hash.Sum(nil)
+			if fmt.Sprintf("%x", blockHash) != torrentInfo.Pieces[i] {
+				log.Fatalf("Hashes are not equal \n blockhash-%x \n pieceHash - %v", blockHash, torrentInfo.Pieces[i])
+			}
+		}
+		buffer = make([]byte, 100000)
 
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+
 }
 
-func getTorrentInfo(contentString string) (string, int, string, int, []string, []byte) {
+func waitForMessage(conn net.Conn) (*PeerMessage, error) {
+
+	// TODO make 30 a constant
+	timer := time.NewTimer(30 * time.Second)
+	msgChan := make(chan *PeerMessage)
+
+	go func() {
+		peerMessage := PeerMessage{
+			PayloadLength: -1,
+			Id:            100,
+			Payload:       make([]uint8, 0),
+		}
+
+		//message length
+		//var messageLength int32
+		//TODO put error handling
+		buffer := make([]byte, 4)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			log.Fatalf("not enough data to read? number of bytes:%v, err- %v", n, err)
+		}
+		err = binary.Read(bytes.NewReader(buffer), binary.BigEndian, &peerMessage.PayloadLength)
+		if err != nil {
+			fmt.Println("cant read length: ", err)
+		}
+		buffer = make([]byte, 1)
+		conn.Read(buffer)
+		binary.Read(bytes.NewReader(buffer), binary.BigEndian, &peerMessage.Id)
+
+		if peerMessage.PayloadLength > 1 {
+			buffer = make([]byte, peerMessage.PayloadLength-1)
+			conn.Read(buffer)
+			peerMessage.Payload = make([]uint8, peerMessage.PayloadLength-1)
+			binary.Read(bytes.NewReader(buffer), binary.BigEndian, &peerMessage.Payload)
+		}
+
+		msgChan <- &peerMessage
+	}()
+
+	select {
+	case <-timer.C:
+		return nil, fmt.Errorf("timed Out, no msg received")
+	case msg := <-msgChan:
+		return msg, nil
+	}
+
+	// now return the message
+
+	return nil, fmt.Errorf("Something went horrible")
+}
+
+func sendMessage(conn net.Conn, message PeerMessage) error {
+	timer := time.NewTimer(30 * time.Second)
+	doneChan := make(chan bool)
+	errorChan := make(chan error)
+	go func() {
+		var buffer bytes.Buffer
+		if err := binary.Write(&buffer, binary.BigEndian, message.PayloadLength); err != nil {
+			errorChan <- fmt.Errorf("Unable to write message length to buffer: %w", err)
+			return
+		}
+		if err := binary.Write(&buffer, binary.BigEndian, message.Id); err != nil {
+			errorChan <- fmt.Errorf("Unable to write message id to buffer: %w", err)
+			return
+		}
+		if err := binary.Write(&buffer, binary.BigEndian, message.Payload); err != nil {
+			errorChan <- fmt.Errorf("Unable to write message payload to buffer: %w", err)
+			return
+		}
+		_, err := conn.Write(buffer.Bytes())
+		if err != nil {
+			errorChan <- fmt.Errorf("Unable to write message to peer: %w", err)
+			return
+		}
+		doneChan <- true
+	}()
+	select {
+	case <-timer.C:
+		return fmt.Errorf("Timeout while sending message: %v", message)
+	case err := <-errorChan:
+		return err
+	case <-doneChan:
+		return nil
+	}
+}
+
+// getTorrentInfo extracts relevant information from a Bencode-encoded torrent metadata string.
+// It returns the following information:
+//   - Announce URL: the URL where the torrent tracker is located.
+//   - Total Length: the total size of the torrent content in bytes.
+//   - Info Hash: the SHA-1 hash of the torrent info.
+//   - Piece Length: the size of each piece in bytes.
+//   - Pieces: a slice of piece hashes.
+//   - Hash Bytes: the raw hash bytes of the torrent info.
+func getTorrentInfo(contentString string) TorrentInfo {
 	decodedData, _, err := decodeBencode(contentString)
 	if err != nil {
 		fmt.Printf("Invalid decoding string to fetch info %v", err)
@@ -249,7 +474,16 @@ func getTorrentInfo(contentString string) (string, int, string, int, []string, [
 	hashString := fmt.Sprintf("%x", hashBytes)
 
 	pieces, err := getPieces(metadata.Info.Pieces)
-	return metadata.Announce, metadata.Info.Length, hashString, metadata.Info.PieceLength, pieces, hashBytes
+	torrentInfo := TorrentInfo{
+		Announce:    metadata.Announce,
+		TotalLength: metadata.Info.Length,
+		InfoHash:    hashString,
+		PieceLength: metadata.Info.PieceLength,
+		Pieces:      pieces,
+		RawInfoHash: hashBytes,
+	}
+	//return metadata.Announce, metadata.Info.Length, hashString, metadata.Info.PieceLength, pieces, hashBytes
+	return torrentInfo
 }
 
 func getPieces(pieces string) ([]string, error) {
@@ -273,7 +507,9 @@ func getTrackerResponse(filePath string) (int, []string, error) {
 		log.Fatal(err)
 	}
 	fileContentString := string(content)
-	baseUrl, length, _, _, _, infoHashRaw := getTorrentInfo(fileContentString)
+	torrentInfo := getTorrentInfo(fileContentString)
+
+	baseUrl, length, infoHashRaw := torrentInfo.Announce, torrentInfo.TotalLength, torrentInfo.RawInfoHash
 	params := url.Values{}
 	params.Add("info_hash", string(infoHashRaw))
 	params.Add("peer_id", "00112233445566778899")
@@ -339,6 +575,55 @@ type MetadataInfo struct {
 }
 
 type TrackerResponse struct {
-	Internval int    `bencode:"interval"`
-	Peers     string `bencode:"peers"`
+	Interval int    `bencode:"interval"`
+	Peers    string `bencode:"peers"`
+}
+
+type PeerMessage struct {
+	PayloadLength int32
+	Id            MessageId
+	Payload       []uint8
+}
+
+type MessageId uint8
+
+const (
+	choke      MessageId = 0
+	unchoke              = 1
+	interested           = 2
+	have                 = 4
+	bitfield             = 5
+	request              = 6
+	piece                = 7
+	cancel               = 8
+)
+
+//func encodePeerMessage(message PeerMessage) ([]byte, error) {
+//	// Encode PayloadLength (4 bytes, big-endian)
+//	var payloadLengthBytes [4]byte
+//	binary.BigEndian.PutUint32(payloadLengthBytes[:], binary.BigEndian.Uint32(message.PayloadLength))
+//
+//	// Encode the MessageId (1 byte)
+//	messageIdByte := byte(message.Id)
+//
+//	// Concatenate the encoded fields
+//	encodedMessage := append(payloadLengthBytes[:], messageIdByte)
+//	encodedMessage = append(encodedMessage, message.Payload...)
+//
+//	return encodedMessage, nil
+//}
+
+type TorrentInfo struct {
+	Announce    string
+	TotalLength int
+	InfoHash    string
+	PieceLength int
+	Pieces      []string
+	RawInfoHash []byte
+}
+
+func intToBytes(num int) []uint8 {
+	bytes := make([]uint8, 4)
+	binary.BigEndian.PutUint32(bytes, uint32(num))
+	return bytes
 }
